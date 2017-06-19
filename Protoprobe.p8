@@ -1,15 +1,20 @@
 pico-8 cartridge // http://www.pico-8.com
 version 8
 __lua__
+--globals
 framerate = 60
 bullet_color = {}
 bullet_color["a"] = 12
 bullet_color["b"] = 9
 bullet_color["c"] = 11
+bullet_color["o"] = 8
+bullet_color["w"] = 8
 bullet_color.complement = {}
 bullet_color.complement["a"] = 13
 bullet_color.complement["b"] = 4
 bullet_color.complement["c"] = 3
+bullet_color.complement["o"] = 2
+bullet_color.complement["w"] = 8
 --[[
 btn (i (p))
   get button i state for player p (default 0)
@@ -121,7 +126,7 @@ function exists(obj,search)
   return false
 end
 function in_range(_x,_a,_b)
-  return _x >= _a and _x <= _b
+  return _x >= min(_a,_b) and _x <= max(_b,_a)
 end
 function clamp(_x,_a,_b)
   return _x <= _a and _a or _x >= _b and _b or _x
@@ -132,21 +137,31 @@ end
 function center(_start,_width)
   return _start-(_width/2)
 end
+function cycle(_x,_min,_max)
+  if _x > _max then
+    return _min
+  else
+    return _x
+  end
+end
 --linear interporlation
 function lerp(_min,_max,_t)
   return (_max-_min)*(_t <= 1 and _t or 1)+_min
 end
---sin interporlation
-function serp(_min,_max,_t)
-  local sqt = t*t
-  return lerp(_min,_max,sqt / (2 * (sqt - t) + 1))
-end
+--intersections
 function interval_intersect(_x1,_x2,_y1,_y2)
   return max(_x1,_y1) <= min(_x2,_y2)
 end
 function rect_intersect(_x1,_y1,_width1,_height1,_x2,_y2,_width2,_height2)
   return interval_intersect(_x1,_x1+_width1,_x2,_x2+_width2) and
   interval_intersect(_y1,_y1+_height1,_y2,_y2+_height2)
+end
+--concat
+function concat(_a,_b)
+  for elem in all(_b) do
+    add(_a,elem)
+  end
+  return _a
 end
 function set_to(_tablea,_tableb)
   --test
@@ -467,6 +482,7 @@ function new_entity(_name,_tag,_position,_update,_draw,_body,_model,_z)
           frame=0
         }
 end
+--scene
 function new_scene(_starting,_ending,_update,_draw,_late_update,_model)
 --[[
 --a scene is a manager for any particular segments of a game and should be used as a tool
@@ -490,12 +506,14 @@ function new_game(_starting_scene)
     --sorry this looks bad, token saver.
     local
     active_scene, --_starting_scene
-    entities, --{}
+    entities, --[{},{},{}] depending on z index is array index
+    entity_pool,
     game_camera, --{x=0,y=0,width=128,height=128}
     settings, --{show_hitboxes=true,entities_active=true}
     frame, --0
     started =  --false
     _starting_scene,
+    {},
     {},
     {x=0,y=0,width=128,height=128},
     {show_hitboxes=false,entities_active=true,update_frame = 1},
@@ -535,7 +553,7 @@ function new_game(_starting_scene)
 
     local function rectcast(_rect)
       local ret = {}
-      for entity in all(entities) do
+      for entity in all(entity_pool) do
         for hitbox in all(entity.body.hitboxes) do
           if rect_intersect(_rect, new_rect(entity.position.x+hitbox.x,entity.position.y+hitbox.y,hitbox.width,hitbox.height)) then
             add(ret,entity)
@@ -548,7 +566,7 @@ function new_game(_starting_scene)
     local function get_entities_on_camera(_thresh)
       local ret = {}
       _thresh = _thresh or 0
-      for entity in all(entities) do
+      for entity in all(entity_pool) do
         if exists_in_camera(entity.position,_thresh) then
           add(ret,entity)
         end
@@ -556,22 +574,31 @@ function new_game(_starting_scene)
       return ret
     end
     --entity api
+    local function get_entities()
+      local ret = {}
+      for ent_index in all(entities) do
+        concat(ret,ent_index)
+      end
+      return ret
+    end
     local function add_entity(_entity)
       if type(_entity) == "table" and _entity.name != nil then
-        add(entities,_entity)
+        if entities[_entity.z] == nil then
+          entities[_entity.z] = {}
+        end
+        add(entities[_entity.z],_entity)
       end
       return _entity
     end
     local function remove_entity(_entity)
-      del(entities,_entity)
+      del(entities[_entity.z],_entity)
     end
     local function empty_entities()
-      for k,v in pairs(entities) do entities[k] = nil end
       entities = {}
     end
     local function locate_entity_name(_name)
       local ret = {}
-      for entity in all(entities) do
+      for entity in all(get_entities()) do
         if entity.name == _name then
           add(ret,entity)
         end
@@ -580,25 +607,23 @@ function new_game(_starting_scene)
     end
     local function locate_entity_tag(_tag)
       local ret = {}
-      for entity in all(entities) do
+      for entity in all(get_entities()) do
         if exists(entity.tags,_tag) then
           add(ret,entity)
         end
       end
       return ret
     end
-    local function get_entities()
-      return entities
-    end
     --frame api
     local function update()
+      entity_pool = get_entities()
       --update scene
-      active_scene.update()
+      active_scene.update(active_scene)
       active_scene.frame += 1
       if settings.entities_active and frame % settings.update_frame == 0 then
-        collision_update(entities)
+        collision_update(entity_pool)
         --update entities
-        for entity in all(entities) do
+        for entity in all(entity_pool) do
           entity.update(entity)
           entity.frame += 1
         end
@@ -609,30 +634,8 @@ function new_game(_starting_scene)
       if frame % settings.update_frame == 0 then
         cls()
         camera(-game_camera.x,-game_camera.y)
-        active_scene.draw()
-        local function z_indexed()
-          --test
-          local ret,z_ordered,z_low,z_high = {},{},0,0
-          for entity in all(entities) do
-            if entity.z < z_low then
-              z_low = entity.z
-            end
-            if entity.z > z_high then
-              z_high = entity.z
-            end
-            if z_ordered[entity.z] == nil then
-              z_ordered[entity.z] = {}
-            end
-            add(z_ordered[entity.z],entity)
-          end
-          for i=z_low,z_high do
-            for entity in all(z_ordered[i]) do
-              add(ret,entity)
-            end
-          end
-          return ret
-        end
-        for entity in all(z_indexed()) do
+        active_scene.draw(active_scene)
+        for entity in all(entity_pool) do
           entity.draw(entity)
           if settings.show_hitboxes == true then
             entity.body:draw(entity)
@@ -681,70 +684,87 @@ entity_table = {}
 --bullet_manager
 entity_table.bullet_manager =
 function (_rails,_comp_bullet_pattern,_player)
-  local bullet_pool,tempo,speed = {},8,1
-  local sprites = {a=64,b=80,c=96}
-  local w,h = 8,6
+  local bullet_pool,speed,row = {},1,1
+  local sprites = {a=64,b=80,c=96,o=112,w=68}
+  local rects = {a=new_rect(1,1,6,7),b=new_rect(0,1,6,7),c=new_rect(2,1,6,7),o=new_rect(0,0,8,8),w=new_rect(0,0,8,8)}
   local parsed_bullet_pattern = split(_comp_bullet_pattern,',')
   local running_distance = 0
   local endings = {new_vector(_rails[1].position.x,126),new_vector(_rails[2].position.x,126)}
-  --parse bullet string to objects
-  for i=1,#parsed_bullet_pattern do
-    local row = parsed_bullet_pattern[i]
-    local split = split(parsed_bullet_pattern[i],"|")
-    if sub(row,1,1) == ">" then
-      --tempo set
-      tempo = cut(split[1],">")
-      speed = split[2]
-    else
-      --bullet row
-      for j=1, #split do
-        if split[j] != "" then
-          local x = flr((_rails[1].position.x-_rails[2].position.x)/2)
-          if j == 1 then
-            x = _rails[1].position.x
-          elseif j == 3 then
-            x = _rails[2].position.x
-          end
-          add(bullet_pool,new_hitbox(x-flr(w/2),running_distance,w-1,h-1,split[j]))
-        end
-      end
-      running_distance -= str_to_num(tempo)
-    end
-  end
+  local bullet_clip = nil
+  local bullet_frames = 0
+  local bullet_pattern_fin = false
+  local message = ""
   local gib_pool = {}
   local gib_anim = function(_position,_end_position,_color,_comp_color,_capture)
     local frame = 0
     local start = new_vector(_position.x,_position.y)
-    local size = 4
+    local size = 2
+    local w,h = 8,8
+    local max_frame = 7
     local anim = function ()
-      while frame <= 10 do
+      while frame <= max_frame do
         if _capture then
-          _position:lerp(start,_end_position,frame/10)
-          circfill(_position.x+w/2,_position.y+h/2,size-lerp(0,size,frame/10),_color)
-          circfill(_position.x+w/2,_position.y+h/2,size/2-lerp(0,size/2,frame/10),7)
-          circ(_position.x+w/2,_position.y+h/2,size-lerp(0,size,frame/10),_comp_color)
-        else 
-          circfill(_position.x+w/2,_position.y+h/2,size+lerp(0,size,frame/10),_color)
-          circfill(_position.x+w/2,_position.y+h/2,size/2+lerp(0,size/2,frame/10),7)
-          circ(_position.x+w/2,_position.y+h/2,size+lerp(0,size,frame/10),_comp_color)
+          _position:lerp(start,_end_position,frame/max_frame)
+          circfill(_position.x,_position.y,size-lerp(0,size,frame/max_frame),_color)
+          circfill(_position.x,_position.y,size/2-lerp(0,size/2,frame/max_frame),7)
+          circ(_position.x,_position.y,size-lerp(0,size,frame/max_frame),_comp_color)
+        else
+          circfill(_position.x+w/2,_position.y+h/2,size+lerp(0,size,frame/max_frame),_color)
+          circfill(_position.x+w/2,_position.y+h/2,size/2+lerp(0,size/2,frame/max_frame),7)
+          circ(_position.x+w/2,_position.y+h/2,size+lerp(0,size,frame/max_frame),_comp_color)
         end
         frame += 1
         yield()
       end
     end
-    
+
     return cocreate(anim)
   end
 
   return new_entity("bullet_manager",
-        {"manager"},
+        {},
         new_vector(),
         function (entity)
+          --update
+          --place bullets
+          --parse bullet string to objects
+          if bullet_frames % 8 == 0 and parsed_bullet_pattern[row] != nil then
+            local split = split(parsed_bullet_pattern[row],"|")
+            --bullet row
+            for j=1, #split do
+              if split[j] != "" then
+                local x = 0
+                local rect = rects[split[j]]
+                if j == 1 then
+                  add(bullet_pool,new_hitbox(_rails[1].position.x+rect.x-flr(rect.width/2),0,rect.width-1,rect.height,split[j]))
+                elseif j == 2 then
+                  add(bullet_pool,new_hitbox(65+rect.x-flr(rect.width/2),0,rect.width-1,rect.height,split[j]))
+                elseif j == 3 then
+                  add(bullet_pool,new_hitbox(_rails[2].position.x+rect.x-flr(rect.width/2),0,rect.width-1,rect.height,split[j]))
+                elseif j == 4 then
+                elseif j == 5 then
+                  message = split[j]
+                end
+              end
+            end
+            row += 1
+          end
+          --move bullets
+          local bullets_to_remove = {}
           for i=1,#bullet_pool do
             bullet_pool[i].y += speed * (bullet_pool[i].y >= _player.position.y+10 and 6 or bullet_pool[i].y <= 4 and bullet_pool[i].y >= 0 and 4 or 1)
+            if bullet_pool[i].y >= 128 then
+              add(bullets_to_remove,bullet_pool[i])
+            end
           end
+          for i=1,#bullets_to_remove do
+            del(bullet_pool,bullets_to_remove[i])
+          end
+          bullets_to_remove = nil
+          bullet_frames += 1
         end,
         function (entity)
+          --draw
           for i=1,#gib_pool do
             if gib_pool[i] and costatus(gib_pool[i]) != "dead" then
               coresume(gib_pool[i])
@@ -753,17 +773,22 @@ function (_rails,_comp_bullet_pattern,_player)
             end
           end
           for i=1,#bullet_pool do
-            spr(sprites[bullet_pool[i].name],bullet_pool[i].x,bullet_pool[i].y)
+            if bullet_pool[i].y < 16 or bullet_pool[i].y >= 110 then
+              spr(sprites[bullet_pool[i].name]+1,bullet_pool[i].x,bullet_pool[i].y)
+            else
+              spr(sprites[bullet_pool[i].name],bullet_pool[i].x,bullet_pool[i].y)
+            end
           end
           for i=1,#endings do
-            spr(63,endings[i].x-4,endings[i].y)
+            spr(63,endings[i].x-3,endings[i].y-3)
+            spr(63,endings[i].x-3,-3,1,1,true,true)
           end
         end,
         new_body(bullet_pool,
         function (entity,coll,e_hitbox,coll_hitbox)
           if coll.name == "player" then
             if coll_hitbox.name == "shield" and coll.model.defense_type == e_hitbox.name then
-              add(gib_pool,gib_anim(new_vector(e_hitbox.x,e_hitbox.y),coll.position,bullet_color[e_hitbox.name],bullet_color.complement[e_hitbox.name],true))
+              add(gib_pool,gib_anim(new_vector(e_hitbox.x,e_hitbox.y),coll.model.energy_pools[e_hitbox.name],bullet_color[e_hitbox.name],bullet_color.complement[e_hitbox.name],true))
               del(bullet_pool,e_hitbox)
             elseif coll_hitbox.name == "chassis" and coll.model.defense_type != e_hitbox.name then
               add(gib_pool,gib_anim(new_vector(e_hitbox.x,e_hitbox.y),coll.position,bullet_color[e_hitbox.name],bullet_color.complement[e_hitbox.name],false))
@@ -775,30 +800,45 @@ function (_rails,_comp_bullet_pattern,_player)
         2
         )
   end
-entity_table.segments = 
-function(_rect)
-  local seglength = round(_rect.height/3)
-  local segments = {new_hitbox(_rect.x,_rect.y,_rect.x+_rect.width,_rect.height-seglength*2,"seg1",false),
-                    new_hitbox(_rect.x,_rect.y+seglength,_rect.x+_rect.width,_rect.height-seglength*2,"seg2",false),
-                    new_hitbox(_rect.x,_rect.y+seglength*2,_rect.x+_rect.width,_rect.height-seglength*2,"seg3",false)}
-  
-  return new_entity("segments", {"segments"}, new_vector(),
+entity_table.background =
+function()
+  local
+  ending,straight,turn,connect,
+  square,
+  triple_straight,triple_turn,triple_connect =
+  240, 224, 192, 208,
+  193,
+  209, 225, 241
+  --[[
+  relevent spr info
+  sprite id
+  color type
+  flipx
+  flipy
+  ]]--
+  local background_spr_sheet = {
+  }
+
+  return new_entity("background", {},
+          new_vector(),
+          function (entity)
+
+          end,
           function (entity)
           end,
-          function (entity) 
-          end,
-          new_body(segments, 
-          function (entity,coll,segment) 
-          end),
+          new_body(),
           {},
-          -1)
+          1)
 end
 --rails
-entity_table.rail = 
+entity_table.rail =
 function(_rail_count,_spatial_difference,_even)
+  --[[
+  
+  ]]--
   local mid_point = 64
-  local y_offset = 15
-  local size = 128-y_offset
+  local y_offset = 24
+  local size = 128-y_offset*2
   local width = 1
   local spot = mid_point-_spatial_difference/2 + (_rail_count-1)*_spatial_difference
   if not _even then
@@ -812,11 +852,12 @@ function(_rail_count,_spatial_difference,_even)
   end,
   function (entity)
     local p = entity.position
-    rectfill(p.x-1,p.y,p.x+width-1,p.y+size,7)
+    rectfill(p.x,p.y,p.x+width,p.y+size,7)
+    rect(p.x-1,p.y,p.x+width+1,p.y+size,1)
   end,
   new_body(),
   {},
-  -1)
+  1)
 end
 
 --player
@@ -824,176 +865,289 @@ entity_table.player =
 function(_rails,_segments)
   local w,h = 10,13
   local sprite = new_sprite(0,0,0,2,2)
+  local glow_anim = nil
+  local glow_sprite = new_sprite()
+  local glow_clip = new_clip("6,0,0,2,2|8,0,0,2,2//",2)
   local speed = 1
   local min_rail = 1
   local max_rail = #_rails
   local cur_rail = round(max_rail/2)
-  local position = new_vector(center(_rails[cur_rail].position.x,w),120-h)
-  local shield = new_hitbox(0,0,w-1,h-1,"shield")
-  local chassis = new_hitbox(3,4,3,3,"chassis")
+  local shield = new_hitbox(1,-1,w-1,h,"shield")
+  local chassis = new_hitbox(4,6,3,1,"chassis")
   local rail_transition = nil
   local side_flame_anim = nil
   local transition_speed = 7
-  local transition_offset = 0
+  local transition_offset = zero
+  --segments
+  local segments = split(_segments,"|")
+  local cur_segment = 3
+  local segment_distance = 10
+  local seg_start = 104
+  --position
+  local position = new_vector(center(_rails[cur_rail].position.x,w),seg_start - (cur_segment*segment_distance)-h)
+  --bounce
   local bounce_transition = nil
   local bounce_speed = 4
-  local bounce_distance = 4
-  local bounce_thresh = 0
-  local energy = 0 
+  local bounce_end = 108
+  local bounce_floor = 127
+  local bounce_ceil = 112
+  --dying
+  local dying_anim = nil
+
+
   local hitback_anim = nil
   local hitback_start = nil
-  local hitback_distance = 30
+  local hitback_distance = 50
   local state = "free"
   --[[
-  States:
+  states:
   hold
   free
+  attack
   hitstun
+  dying
   ]]--
-  local last_btn = ""
-  local input = ""
+  local state_free = "default"
+  --[[
+  state_free states:
+  default
+  transition,
+  bounce,
+  ]]--
+  local last_btn = "a"
+  local input = "a"
+  local cur_btn = "a"
   local btn_frame = 0
-  local btn_delay = 3
+  local btn_delay = 4
+  local direction = ""
+  --center
+  local attack_platform = new_vector(65,100)
+  local attack_platform_size = 8
+  --energy
+  local total_energy = 0
+  local total_max_energy = 50
+  local energy = {}
+  energy.a = 0
+  energy.b = 0
+  energy.c = 0
+  local energy_max = 3
+  local energy_pools = {}
+  energy_pools.a = new_vector(attack_platform.x,attack_platform.y+attack_platform_size+6)
+  energy_pools.b = new_vector(attack_platform.x-attack_platform_size-2,attack_platform.y+attack_platform_size+2)
+  energy_pools.c = new_vector(attack_platform.x+attack_platform_size+2,attack_platform.y+attack_platform_size+2)
+  local energy_pool_size = attack_platform_size-4
   return new_entity("player",
-        {"player"},
+        {},
         position,
         function (entity)
           local state = entity.model.state
           if state == "hold" then
             --nothing
           elseif state == "free" then
-            local cur_btn = ""
+            --input data
             if btn(4) and not btn(5) then
-              cur_btn = "z"
+              cur_btn = "b"
             elseif btn(5) and not btn(4) then
-              cur_btn = "x"
+              cur_btn = "c"
+            else
+              cur_btn = "a"
             end
-            
+
+            if btnp(2) and not btn(3) then
+              direction = "up"
+            elseif btnp(3) and not btn(2) then
+              direction = "down"
+            else
+              direction = ""
+            end
+
             --[[
               if the current input is the last input, the button has been held another frame,
               if the btn_frame has reached the button delay, the input is changed.
             ]]--
-            if cur_btn == last_btn then
+            if cur_btn == last_btn and cur_btn != input then
               btn_frame += 1
             else
               btn_frame = 0
             end
-            
+
             if btn_frame >= btn_delay then
               input = cur_btn
               btn_frame = 0
             end
-            
             last_btn = cur_btn
 
-            if input == "z" then
+            if input == "b" then
               sprite.n = 2
               entity.model.defense_type = "b"
-            elseif input == "x" then
+            elseif input == "c" then
               sprite.n = 4
               entity.model.defense_type = "c"
-            elseif input == "" then
+            elseif input == "a" then
               sprite.n = 0
               entity.model.defense_type = "a"
             end
-            
-            --left transition
-            if btn(0) and not btn(1) and cur_rail-1 >= min_rail and not rail_transition then
-              cur_rail -= 1
-              rail_transition = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y),transition_speed)
-              side_flame_anim = new_animation(new_clip("",1,
-                function (_sample)
-                  local x0,x1,y = entity.position.x-sin(_sample/20)*8+w,entity.position.x+w-2,entity.position.y
-                  local c 
-                  if entity.model.defense_type == "a" then
-                    c = _sample <= 5 and 12 or 2
-                  elseif entity.model.defense_type == "b" then
-                    c = _sample <= 5 and 9 or 2
-                  else
-                    c = _sample <= 5 and 11 or 2
-                  end
-                  rectfill(x0,y+1,x1,y+11,c)
-                end, 10))
-            end
-            --right transition
-            if btn(1) and not btn(0) and cur_rail+1 <= max_rail and not rail_transition then
-              cur_rail += 1
-              rail_transition = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y),transition_speed)
-              side_flame_anim = new_animation(new_clip("",1,
-                function (_sample) 
-                  local x0,x1,y = entity.position.x+sin(_sample/20)*8,entity.position.x+2,entity.position.y
-                  local c 
-                  if entity.model.defense_type == "a" then
-                    c = _sample <= 5 and 12 or 2
-                  elseif entity.model.defense_type == "b" then
-                    c = _sample <= 5 and 9 or 2
-                  else
-                    c = _sample <= 5 and 11 or 2
-                  end
-                  rectfill(x0,y+1,x1,y+11,c)
-                end, 10))
-            end
+            --end input data
+            --verticle
+            --[[
             --up
-            if btn(2) and not bounce_transition then
-              entity.position.y -= speed
+            if direction == "up" and entity.position.y > 23 then
               transition_offset = new_vector(0,-speed)
             end
             --down
-            if btn(3) and not bounce_transition then
-              entity.position.y += speed
+            if direction == "down" then
               transition_offset = new_vector(0,speed)
             end
-            --bounce
-            if entity.position.y >= 128+bounce_thresh-h then
-              bounce_transition = vector.animation.movetoinframes(entity.position,new_vector(entity.position.x,128-bounce_distance-h),bounce_speed)
-            end
+            ]]
             --bounce animation
             if bounce_transition then
               coresume(bounce_transition,transition_offset)
-              if costatus(bounce_transition) == "dead" then 
-                bounce_transition = nil
+              transition_offset = new_vector(0,0)
+            end
+            if not bounce_transition or costatus(bounce_transition) == "dead" then
+              bounce_transition = nil
+            end
+            --free_states
+            if state_free == "default" then
+              if btnp(2) then
+                cur_segment = clamp(cur_segment+1,0,#segments-1)
+              elseif btnp(3) then
+                cur_segment = clamp(cur_segment-1,0,#segments-1)
+              elseif btn(0) and not btn(1) and cur_rail-1 >= min_rail then
+                cur_rail -= 1
+                rail_transition = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y),transition_speed)
+                side_flame_anim = new_animation(new_clip("",1,
+                  function (_sample)
+                    local x0,x1,y = entity.position.x-sin(_sample/20)*8+w,entity.position.x+w-2,entity.position.y
+                    local c
+                    if entity.model.defense_type == "a" then
+                      c = _sample <= 5 and 12 or 2
+                    elseif entity.model.defense_type == "b" then
+                      c = _sample <= 5 and 9 or 2
+                    else
+                      c = _sample <= 5 and 11 or 2
+                    end
+                    rectfill(x0,y+1,x1,y+11,c)
+                  end, 10))
+                  state_free = "htransition"
+              --right transition
+              elseif btn(1) and not btn(0) and cur_rail+1 <= max_rail then
+                cur_rail += 1
+                rail_transition = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y),transition_speed)
+                side_flame_anim = new_animation(new_clip("",1,
+                  function (_sample)
+                    local x0,x1,y = entity.position.x+sin(_sample/20)*8,entity.position.x+2,entity.position.y
+                    local c
+                    if entity.model.defense_type == "a" then
+                      c = _sample <= 5 and 12 or 2
+                    elseif entity.model.defense_type == "b" then
+                      c = _sample <= 5 and 9 or 2
+                    else
+                      c = _sample <= 5 and 11 or 2
+                    end
+                    rectfill(x0,y+1,x1,y+11,c)
+                  end, 10))
+                  state_free = "htransition"
+              end
+              entity.position.y += transition_offset.y
+            end
+            if state_free == "htransition" then
+              --transition animation
+              if rail_transition then
+                coresume(rail_transition,transition_offset)
+              end
+              if not rail_transition or costatus(rail_transition) == "dead" then
+                rail_transition = nil
+                state_free = "default"
               end
             end
-            --transition animation
-            if rail_transition then
-              coresume(rail_transition,transition_offset)
-              if costatus(rail_transition) == "dead" then 
-                rail_transition = nil
+            if state_free == "vtransition" then
+              if segment_transition then
+                coresume(segment_transition)
               end
+            end
+            --bounce bot
+            if in_range(entity.position.y,bounce_floor,bounce_ceil) then
+              bounce_transition = vector.animation.movetoinframes(entity.position,new_vector(entity.position.x,bounce_end),bounce_speed)
+            end
+            --switch to attack
+            if total_energy >= total_max_energy then
+              --cur_rail = 0
+              rail_transition = vector.animation.movetoinframes(entity.position,attack_platform - new_vector(w/2-2,h/2-1),transition_speed)
+              entity.model.state = "attack"
             end
             transition_offset = zero
+            entity.position.y = seg_start - (cur_segment * segment_distance) - h
           elseif state == "hitstun" then
             if hitback_anim then
-            --hitback_anim
               coresume(hitback_anim,zero)
-              if costatus(hitback_anim) == "dead" then 
+              if entity.position.y > bounce_floor then
+                hitback_anim = nil
+                entity.model.state = "dying"
+              elseif costatus(hitback_anim) == "dead" then
                 hitback_anim = nil
                 entity.model.state = "free"
               end
             end
-          else 
-            printh("Error Bad Player State")
+          elseif state == "attack" then
+          elseif state == "dying" then
           end
         end,
         function (entity)
+          --attack_platform
+          --[[
+          if total_energy >= total_max_energy then
+            circfill(attack_platform.x,attack_platform.y,attack_platform_size,2)
+            circfill(attack_platform.x,attack_platform.y,attack_platform_size-1,15)
+            rectfill(attack_platform.x-4,attack_platform.y+1,attack_platform.x-4,attack_platform.y-1,14)
+            rectfill(attack_platform.x+4,attack_platform.y+1,attack_platform.x+4,attack_platform.y-1,14)
+          else
+            circ(attack_platform.x,attack_platform.y,attack_platform_size,2)
+            circfill(attack_platform.x,attack_platform.y,lerp(0,attack_platform_size,total_energy/total_max_energy),1)
+          end
+          ]]
+          local x,y = entity.position.x,entity.position.y
           if side_flame_anim then
             coresume(side_flame_anim)
           end
           sprite:draw(entity.position)
+          --input delay feedback
+          if btn_frame > 0 then
+            rectfill(x+5,y+7,x+6,y+7-flr(lerp(-1,4,btn_frame/btn_delay)),bullet_color[cur_btn])
+          end
+          --energy pools
+          circ(energy_pools.a.x,energy_pools.a.y,energy_pool_size,bullet_color.complement["a"])
+          circ(energy_pools.b.x,energy_pools.b.y,energy_pool_size,bullet_color.complement["b"])
+          circ(energy_pools.c.x,energy_pools.c.y,energy_pool_size,bullet_color.complement["c"])
+          circfill(energy_pools.a.x,energy_pools.a.y,lerp(0,energy_pool_size-1,energy.a/energy_pool_size),bullet_color["a"])
+          circfill(energy_pools.b.x,energy_pools.b.y,lerp(0,energy_pool_size-1,energy.b/energy_pool_size),bullet_color["b"])
+          circfill(energy_pools.c.x,energy_pools.c.y,lerp(0,energy_pool_size-1,energy.c/energy_pool_size),bullet_color["c"])
+          --glow
+          if glow_anim then
+            coresume(glow_anim)
+            glow_sprite:draw(entity.position)
+            if costatus(glow_anim) == "dead" then
+              glow_anim = nil
+            end
+          end
         end,
         new_body({shield,chassis},
         function (entity,coll,e_hitbox,coll_hitbox)
           if coll.name == "bullet_manager" then
             if e_hitbox.name == "shield" then
-              energy += 1
+              if entity.model.defense_type == coll_hitbox.name then
+                energy[coll_hitbox.name] = clamp(energy[coll_hitbox.name]+1,0,energy_pool_size)
+                glow_anim = new_animation(glow_clip,glow_sprite)
+              end
             elseif e_hitbox.name == "chassis" then
-              hitback_anim = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y + hitback_distance),5)
+              --hitback_anim = vector.animation.movetoinframes(entity.position,new_vector(center(_rails[cur_rail].position.x,w),entity.position.y + hitback_distance),5)
+              cur_segment = clamp(cur_segment-1,0,#segments-1)
+              entity.position.y = seg_start - (cur_segment * segment_distance) - h
               rail_transition = nil
-              entity.model.state = "hitstun"
             end
           end
         end),
-        {defense_type="a",h=h,w=h,state=state},
+        {defense_type="a",h=h,w=h,state=state,attack_platform=attack_platform,energy_pools=energy_pools},
         1
         )
   end
@@ -1002,7 +1156,9 @@ entity_table.enemy =
 function()
   local w,h = 16,16
   local sprite = new_sprite(128,0,0,2,2)
-  local position = new_vector(center(64,w),-h/2+10)
+  local hands = new_sprite(160,0,0,2,1)
+  local position = new_vector(center(65,w),-h/2+10)
+  local hands_position = new_vector(0,h)
   local start_position = new_vector(position.x,position.y)
   local hitbox = new_hitbox(0,0,w-1,h-1)
   local bottom_sway = position.y + h/4
@@ -1027,12 +1183,13 @@ function()
         end,
         function (entity)
           sprite:draw(entity.position)
+          hands:draw(entity.position + hands_position)
         end,
         new_body({hitbox},
         function (entity,coll,e_hitbox,coll_hitbox)
         end),
         {},
-        1
+        4
         )
   end
 --scenes
@@ -1040,24 +1197,39 @@ scene_table = {}
 scene_table.init =
 function ()
   return new_scene(function ()
+                  
                     local bullet_pattern = 
-                    'a||,||,b||,||,c||,||,||,||,||b,||,||a,||,||c,||,||,||,c||,||,b||,||,a||'
-
-                    local segments = game.add_entity(entity_table.segments(new_rect(0,15,127,127-17)))
+                    'a|||,|||,|||,a|||,|||,|||,a|||,|||,|||,|||,|||,|||,|||,|||,|||,b|||,|||,|||,b|||,|||,|||,b|||,|||,|||,|||,|||,|||,|||,|||,|||,c|||,|||,|||,c|||,|||,|||,c|||,|||,|||,|||,|||,|||,|||,|||,|||,a|||,|||,|||,a|||,|||,|||,a|||,|||,|||,|||,|||,|||,|||,|||,|||,a|||,|||,|||,b|||,|||,|||,c|||'
+                    --'b||,||,b||,||,a|w|,|w|,||,||,||a,||,||b,||,||c,||,c||,c||,c||,|w|,||,||,||a,||b,||c'
+                    local segments = "w|w|w|w|w|w|w|w"
                     local rails = {}
                     for i=1,2 do
-                      add(rails,game.add_entity(entity_table.rail(i,32,true)))
+                      add(rails,game.add_entity(entity_table.rail(i,40,true)))
                     end
                     local player = game.add_entity(entity_table.player(rails,segments))
-                    game.add_entity(entity_table.bullet_manager(rails,bullet_pattern,player))
+                    game.add_entity(entity_table.background())
                     game.add_entity(entity_table.enemy())
+                    game.add_entity(entity_table.bullet_manager(rails,bullet_pattern,player))
                   end,
                   nil,
-                  function ()
-
+                  function (scene)
                   end,
-                  nil,
-                  nil)
+                  function (scene)
+                    local draw_ui_box = function(_x,_y,_width,_height,_c)
+                      local x = _x - _width/2
+                      local y = _y - _height/2
+                      rect(x,y,x+_width,y+_height,7)
+                      rect(x+1,y+1,x+_width-1,y+_height-1,1)
+                      rect(x+-1,y+-1,x+_width+1,y+_height+1,1)
+                    end
+                    local ui_size = 81
+                    draw_ui_box(63,63,lerp(0,ui_size,scene.frame/20),ui_size)
+                    if scene.frame >= 25 then
+                      print_center("protoprobe",62,31,10)
+                      print_center("iteration  #0",62,42,7)
+                    end
+                  end,
+                  {ui_frame=0})
 end
 
 extensions = {}
@@ -1078,139 +1250,139 @@ function _draw()
 end
 
 __gfx__
-000cccc0000000000009999000000000000bbbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00cc77cc00000000009977990000000000bb77bb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0ce7cc7ec000000009e7997e900000000be7bb7eb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0ce2dd2ec000000009e4dd4e900000000be3dd3eb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-ccedccdecc00000099ed99de99000000bbedbbdebb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-c72dccd27c000000974d99d479000000b73dbbd37b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-c7cdccdc7c000000979d99d979000000b7bdbbdb7b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-c72dccd27c000000974d99d479000000b73dbbd37b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-cce2dd2ecc00000099e4dd4e99000000bbe3dd3ebb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0ce7cc7ec000000009e7997e900000000be7bb7eb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0ccc77ccc000000009997799900000000bbb77bbb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00cccccc00000000009999990000000000bbbbbb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-000cccc0000000000009999000000000000bbbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-000e00e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00881188000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-08e1cc1e800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-e81cccc18e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-181c55c1810000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-01c5555c100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-011c55c1100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-01cccccc100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-181cccc18100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d111111d
-e81cccc18e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006dd11dd6
-08e1111e8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000666dd666
-00800008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066666666
+0000cccc0000000000009999000000000000bbbb0000000000007777000000000000000000000000111111111111111100000000000000000000000000000000
+000cc77cc00000000009977990000000000bb77bb000000000070000700000000000777700000000117777777777777700000000000000000000000000000000
+00ce7cc7ec000000009e7997e900000000be7bb7eb00000000700000070000000000700700000000177111111111111100000000000000000000000000000000
+00ce2dd2ec000000009e4dd4e900000000be3dd3eb00000000700000070000000070000007000000171100000000000000000000000000000000000000000000
+0ccedccdecc00000099ed99de99000000bbedbbdebb0000007000000007000000070000007000000171000000000000000000000000000000000000000000000
+0c72dccd27c000000974d99d479000000b73dbbd37b0000007000000007000000070000007000000171000000000000000000000000000000000000000000000
+0c7cdccdc7c000000979d99d979000000b7bdbbdb7b0000007000000007000000070000007000000171000000000000000000000000000000000000000000000
+0c72dccd27c000000974d99d479000000b73dbbd37b0000007000000007000000070000007000000171000000000000000000000000000000000000000000000
+0cce2dd2ecc00000099e4dd4e99000000bbe3dd3ebb0000007000000007000000070000007000000171000000000000000000000000000000000000000000000
+00ce7cc7ec000000009e7997e900000000be7bb7eb00000000700000070000000070700707000000171000000000000000000000000000000000000000000000
+00cec77cec000000009e9779e900000000beb77beb00000000700000070000000000777700000000171000000000000000000000000000000000000000000000
+000cccccc00000000009999990000000000bbbbbb000000000077777700000000000000000000000171000000000000000000000000000000000000000000000
+0000cccc0000000000009999000000000000bbbb0000000000007777000000000000000000000000171000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000171000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000171000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000171000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065177156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005577550
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000051111115
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000051111115
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000065111156
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066555566
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066666666
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066666666
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066666666
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066666666
-00dccd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0dccccd0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0cc77cc0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0cc77cc0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0dccccd0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00dccd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-04994000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-49999400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-99779900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-99779900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-49999400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-04994000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0003bb30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-003bbbb3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00bb77bb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00bb77bb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-003bbbb3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0003bb30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00077777777770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00777770077777000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777700007777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07700770077007700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07000077770000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07700777777007700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777777777777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777700007777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777777777777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777000000777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07777777777777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-07770000000077700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00777777777777000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00077777777770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000812882180028820081288218000000008128821800000000812882180000000000000000000000000000000000000000
+0dccd00000dd00000000000000000000188888810888888018888881000000001888888100000000188888810000000000000000000000000000000000000000
+dccccd000dccd0000000000000000000288118820881188028811882000000002881188200000000288118820000000000000000000000000000000000000000
+cc77cc000c77c0000000000000000000881881880818818088188188000000008818818800000000881881880000000000000000000000000000000000000000
+cc77cc000c77c0000000000000000000881881880818818088188188000000008818818800000000881881880000000000000000000000000000000000000000
+dccccd000dccd0000000000000000000288118820881188028811882000000002881188200000000288118820000000000000000000000000000000000000000
+0dccd00000dd00000000000000000000818888180188881081888818000000008188881800000000818888180000000000000000000000000000000000000000
+00000000000000000000000000000000881881880018810088188188000000008818818800000000881881880000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+04994000004400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+49999400049940000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+99779900097790000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+99779900097790000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+49999400049940000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+04994000004400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+03bb3000003300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+3bbbb30003bb30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+bb77bb000b77b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+bb77bb000b77b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+3bbbb30003bb30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+03bb3000003300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+88211288000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+81888818000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+28811882000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+18188181000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+18188181000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+28811882000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+81888818000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+88211288000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+70075000000570070000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+77577777777775770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+75777771177777570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+05777712217777500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+77711771177117770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+57122177771221750000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07711775577117700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07777708807777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07777522825777700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07775008800577700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07775228222577700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07750008800057700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07752222822257700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+05750008800057500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00577750057775000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+75000000000000570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+77500000000005770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+77700000000007770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+07000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000065556000505050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00000000050005000505050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+0000000005000500050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c000000c0c000
+000555555500050005050555000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0c000000c0000
+0005000005000500050500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c000000c0c000
+000500000655560005055555000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0c000000c0000
+00050000005550000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00050000050505000555555500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00666000666666600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b000000b0b000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b0b000000b0000
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b000000b0b000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b0b000000b0000
+00666000666666600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009000000909000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000090900000090000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009000000909000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000090900000090000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000000080000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080800000888000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080800000888000
+00050000050505000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000000080000
+00555000555555500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066600000666000
+00555000555555500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000050000
 __gff__
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 __map__
-0000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000e30f0f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
@@ -1222,10 +1394,10 @@ __map__
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+0000000000000000c1cd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000cdd1cd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000cde1cd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000cdf1cdcdcd0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
